@@ -1,0 +1,24 @@
+[package]
+name = "ccctl"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "The CLI tool to control your Claude Code sessions running in tmux"
+license = "MIT"
+readme = "README.md"
+keywords = ["claude", "claude-code", "tmux", "cli", "automation"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+clap = { version = "4.6.7", features = ["derive", "env"] }
+libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.0"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[profile.release]
+lto = true
+strip = true

@@ -1,0 +1,39 @@
+# ccctl configuration — copy to ~/.config/ccctl/config.toml (or set $CCCTL_CONFIG).
+# Every key is optional; the values shown are the defaults.
+
+[claude]
+# Claude Code binary used for discovery (`claude agents --json`).
+bin = "claude"
+# Per-session registry files written by every Claude Code process.
+sessions_dir = "~/.claude/sessions"
+# Transcripts: <projects_dir>/<sanitized cwd>/<sessionId>.jsonl
+projects_dir = "~/.claude/projects"
+# "agents"   = `claude agents --json` is the source of truth (registry adds socket/tmux fields)
+# "registry" = read registry files only (no node/bun spawn; liveness via pid + procStart)
+discovery = "agents"
+
+[sockets]
+# Directories an inbox socket may live in. A registry `messagingSocketPath`
+# outside these is ignored (ccctl then falls back to tmux for `send --via auto`).
+# Empty = $XDG_RUNTIME_DIR/cc-socks, /run/user/<uid>/cc-socks, /tmp/cc-socks, /tmp/cc-socks-<uid>
+roots = []
+
+[timeouts]
+wait = 600.0          # default `wait --timeout` (s)
+ask = 900.0           # default `ask --timeout` (s)
+send_confirm = 10.0   # how long `send` watches the transcript for the delivery record (s)
+peer_receipt = 3.0    # `send --peer-receipt` listen window (s)
+poll_ms = 400         # status poll interval (ms)
+settle_ms = 3000      # after send/cmd, a stale `idle` is ignored for this long (ms)
+enter_delay_ms = 200  # pause between typing text and pressing Enter in `cmd` (ms)
+
+[tmux]
+# bin = "tmux"
+# socket = "/tmp/tmux-1000/default"   # only if your sessions live on a non-default server
+
+[security]
+# Session-name globs that MUTATING commands (send, cmd, ask, approve, deny) may target.
+# Read-only commands (list, status, wait, read, pending, attach) ignore it.
+# Absent  -> every session may be targeted.
+# []      -> no session may be targeted.
+# allowlist = ["api-*", "scratch"]
