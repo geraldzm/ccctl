@@ -6,7 +6,7 @@ use crate::config::Config;
 use crate::discovery::{self, Session, Status};
 use crate::error::{CliError, Code, Result, err};
 use crate::inbox;
-use crate::pane::{self, Choice, Prompt};
+use crate::pane::{self, Choice, Inspection, Prompt};
 use crate::state;
 use crate::tmux::{self, PaneMatch, Tmux};
 use crate::transcript::{self, Turn};
@@ -198,21 +198,77 @@ pub fn list(ctx: &Ctx, all: bool) -> Result<()> {
 
 // ---------------------------------------------------------------- status
 
-/// Why a waiting session is blocked. Claude Code's own `waitingFor`
-/// (from `claude agents --json`) wins; "…permission…" is normalised to
-/// "permission". Without it, fall back to the pane scrape's classification.
-fn waiting_kind(s: &Session, prompt: Option<&Prompt>) -> Option<String> {
+/// Why a waiting session is blocked: "permission", "question", "dialog",
+/// another raw `waitingFor` value, or "unknown". Claude Code's own
+/// `waitingFor` wins (2.1.328: "permission prompt" = tool permission,
+/// "input needed" = AskUserQuestion / MCP elicitation, "dialog open" = other
+/// modal); without it, fall back to what the screen read found.
+fn waiting_kind(s: &Session, insp: Option<&Inspection>) -> Option<String> {
     if s.status != Status::WaitingPermission {
         return None;
     }
-    match &s.waiting_for {
-        Some(w) if w.to_lowercase().contains("permission") => Some("permission".into()),
-        Some(w) => Some(w.clone()),
-        None => prompt.map(|p| p.kind.clone()),
+    if let Some(w) = &s.waiting_for {
+        return Some(pane::kind_from_waiting_for(w));
+    }
+    Some(
+        insp.and_then(|i| i.prompt.as_ref())
+            .map(|p| p.kind.clone())
+            .unwrap_or_else(|| "unknown".into()),
+    )
+}
+
+/// Read-only capture + parse of the pane, only while the session waits.
+fn inspect_pane(ctx: &Ctx, s: &Session, pm: Option<&PaneMatch>) -> Option<Inspection> {
+    if s.status != Status::WaitingPermission {
+        return None;
+    }
+    let p = pm?;
+    let screen = ctx.tmux.capture(&p.pane.pane_id, 0).ok()?;
+    Some(pane::inspect(&screen))
+}
+
+/// JSON fields describing the dialog (merged into status / pending rows).
+fn dialog_json(s: &Session, insp: Option<&Inspection>, want_screen: bool) -> Value {
+    let recognized = insp.map(|i| i.prompt.is_some());
+    let show_screen =
+        want_screen || recognized == Some(false) || insp.is_some_and(|i| i.notice.is_some());
+    json!({
+        "waiting_for": waiting_kind(s, insp),
+        "waiting_for_raw": s.waiting_for,
+        "dialog_recognized": recognized,
+        "prompt": insp.and_then(|i| i.prompt.as_ref()),
+        "notice": insp.and_then(|i| i.notice.as_ref()),
+        "screen": if show_screen { insp.map(|i| i.screen.as_str()) } else { None },
+    })
+}
+
+/// Human description of the dialog, indented under a session line.
+fn print_dialog(s: &Session, insp: Option<&Inspection>, want_screen: bool) {
+    if let Some(w) = waiting_kind(s, insp) {
+        println!("  waiting for: {w}");
+    }
+    let Some(i) = insp else {
+        if s.status == Status::WaitingPermission {
+            println!("  (no tmux pane: dialog not readable)");
+        }
+        return;
+    };
+    if let Some(n) = &i.notice {
+        println!("  notice: {n}");
+    }
+    match &i.prompt {
+        Some(p) => print_prompt(p),
+        None => println!("  dialog: not recognized by ccctl (screen below)"),
+    }
+    if want_screen || i.prompt.is_none() || i.notice.is_some() {
+        println!("  ── screen ──");
+        for l in i.screen.lines() {
+            println!("  │ {l}");
+        }
     }
 }
 
-pub fn status(ctx: &Ctx, sel: &str) -> Result<()> {
+pub fn status(ctx: &Ctx, sel: &str, want_screen: bool) -> Result<()> {
     let s = find(ctx, sel)?;
     let pane = pane_of(ctx, &s);
     let tpath = transcript_of(ctx, &s).ok();
@@ -227,12 +283,13 @@ pub fn status(ctx: &Ctx, sel: &str) -> Result<()> {
         (Some(ts), None) => Some(ts.clone()),
         _ => None,
     };
-    let prompt = if s.status == Status::WaitingPermission {
+    let insp = if want_screen && s.status != Status::WaitingPermission {
+        // Explicit request: capture even when idle/busy (e.g. to save a fixture).
         pane.as_ref()
             .and_then(|p| ctx.tmux.capture(&p.pane.pane_id, 0).ok())
-            .and_then(|scr| pane::parse_prompt(&scr))
+            .map(|scr| pane::inspect(&scr))
     } else {
-        None
+        inspect_pane(ctx, &s, pane.as_ref())
     };
     let is_me = is_self(s.pid);
     if ctx.json {
@@ -240,8 +297,11 @@ pub fn status(ctx: &Ctx, sel: &str) -> Result<()> {
         v["last_activity"] = json!(last_activity);
         v["transcript"] = json!(tpath);
         v["last_msg_id"] = json!(last_turn.as_ref().and_then(|t| t.msg_id.clone()));
-        v["waiting_for"] = json!(waiting_kind(&s, prompt.as_ref()));
-        v["prompt"] = json!(prompt);
+        if let Value::Object(d) = dialog_json(&s, insp.as_ref(), want_screen) {
+            for (k, val) in d {
+                v[k] = val;
+            }
+        }
         v["allowed"] = json!(ctx.cfg.allowed(&s.name));
         v["is_self"] = json!(is_me);
         return print_json(&v);
@@ -252,9 +312,6 @@ pub fn status(ctx: &Ctx, sel: &str) -> Result<()> {
         "status",
         format!("{} (raw: {})", s.status.as_str(), s.raw_status),
     );
-    if let Some(w) = waiting_kind(&s, prompt.as_ref()) {
-        kv("waiting for", w);
-    }
     kv("pid", s.pid.to_string());
     kv("session id", s.session_id.clone());
     kv("cwd", s.cwd.clone());
@@ -300,9 +357,14 @@ pub fn status(ctx: &Ctx, sel: &str) -> Result<()> {
             }
         ),
     );
-    if let Some(p) = prompt {
-        println!("prompt:");
-        print_prompt(&p);
+    if s.status == Status::WaitingPermission {
+        println!("dialog:");
+        print_dialog(&s, insp.as_ref(), want_screen);
+    } else if let Some(i) = insp.as_ref().filter(|_| want_screen) {
+        println!("screen:");
+        for l in i.screen.lines() {
+            println!("  │ {l}");
+        }
     }
     Ok(())
 }
@@ -321,6 +383,9 @@ fn print_prompt(p: &Prompt) {
             o.index,
             o.label
         );
+        if let Some(d) = &o.detail {
+            println!("       {d}");
+        }
     }
 }
 
@@ -489,7 +554,7 @@ fn tmux_ready(ctx: &Ctx, s: &Session, p: &PaneMatch, force: bool, exit_copy: boo
         return err(
             Code::NotAllowed,
             format!(
-                "'{}' is showing a dialog; typing would answer it. Use approve/deny, `cmd --keys`, or --force",
+                "'{}' is showing a dialog; typing would answer it. Use approve/deny/choose, `cmd --keys`, or --force",
                 s.name
             ),
         );
@@ -593,8 +658,12 @@ pub fn ask(ctx: &Ctx, a: &AskArgs) -> Result<()> {
         if cur.status == Status::WaitingPermission && !warned {
             warned = true;
             eprintln!(
-                "ccctl: '{}' is waiting on a permission prompt (see `ccctl pending`)",
-                s.name
+                "ccctl: '{}' is waiting on a dialog ({}); see `ccctl pending`",
+                s.name,
+                cur.waiting_for
+                    .as_deref()
+                    .map(pane::kind_from_waiting_for)
+                    .unwrap_or_else(|| "unknown".into())
             );
         }
         if start.elapsed() >= timeout {
@@ -832,7 +901,7 @@ pub fn read(ctx: &Ctx, a: &ReadArgs) -> Result<()> {
 
 // ---------------------------------------------------------------- approvals
 
-pub fn pending(ctx: &Ctx) -> Result<()> {
+pub fn pending(ctx: &Ctx, want_screen: bool) -> Result<()> {
     let sessions = discovery::discover(&ctx.cfg, true)?;
     let panes = ctx.tmux.list_panes();
     let mut rows = Vec::new();
@@ -841,29 +910,30 @@ pub fn pending(ctx: &Ctx) -> Result<()> {
         .filter(|s| s.status == Status::WaitingPermission)
     {
         let pm = tmux::resolve_with(&panes, s.pid, s.tmux_hint.as_deref(), &s.cwd);
-        let prompt = pm
-            .as_ref()
-            .and_then(|p| ctx.tmux.capture(&p.pane.pane_id, 0).ok())
-            .and_then(|scr| pane::parse_prompt(&scr));
-        rows.push((s, pm, prompt));
+        let insp = inspect_pane(ctx, s, pm.as_ref());
+        rows.push((s, pm, insp));
     }
     if ctx.json {
         let v: Vec<Value> = rows
             .iter()
-            .map(|(s, pm, pr)| {
-                json!({"name": s.name, "pid": s.pid, "session_id": s.session_id, "cwd": s.cwd,
-                       "tmux": pm, "waiting_for": waiting_kind(s, pr.as_ref()),
-                       "waiting_for_raw": s.waiting_for, "prompt": pr,
-                       "since": s.status_updated_at.map(rfc3339_ms)})
+            .map(|(s, pm, insp)| {
+                let mut row = json!({"name": s.name, "pid": s.pid, "session_id": s.session_id,
+                       "cwd": s.cwd, "tmux": pm, "since": s.status_updated_at.map(rfc3339_ms)});
+                if let Value::Object(d) = dialog_json(s, insp.as_ref(), want_screen) {
+                    for (k, val) in d {
+                        row[k] = val;
+                    }
+                }
+                row
             })
             .collect();
         return print_json(&v);
     }
     if rows.is_empty() {
-        eprintln!("no sessions are waiting on a prompt");
+        eprintln!("no sessions are waiting on a dialog");
         return Ok(());
     }
-    for (s, pm, pr) in &rows {
+    for (s, pm, insp) in &rows {
         println!(
             "{} (pid {}, {}){}",
             s.name,
@@ -875,122 +945,138 @@ pub fn pending(ctx: &Ctx) -> Result<()> {
                 .map(|m| format!(" waiting {}", ago(m)))
                 .unwrap_or_default()
         );
-        if let Some(w) = waiting_kind(s, pr.as_ref()) {
-            println!("    waiting for: {w}");
-        }
-        match pr {
-            Some(p) => print_prompt(p),
-            None => println!("    (dialog not readable from the pane)"),
-        }
+        print_dialog(s, insp.as_ref(), want_screen);
     }
     Ok(())
 }
 
-fn answer(ctx: &Ctx, g: &GuardArgs, choice: Choice) -> Result<()> {
+/// A waiting session, its pane, and what is on screen right now.
+struct Target {
+    s: Session,
+    pane: PaneMatch,
+    insp: Inspection,
+}
+
+fn dialog_target(ctx: &Ctx, g: &GuardArgs) -> Result<Target> {
     let s = find(ctx, &g.session)?;
     guard(ctx, &s, g.allow_self)?;
     if s.status != Status::WaitingPermission {
         return err(
             Code::NoPrompt,
             format!(
-                "'{}' is {}, not waiting on a prompt",
+                "'{}' is {}, not waiting on a dialog",
                 s.name,
                 s.status.as_str()
             ),
         );
     }
-    let p = require_pane(ctx, &s)?;
-    if p.pane.in_mode {
+    let pane = require_pane(ctx, &s)?;
+    if pane.pane.in_mode {
         return err(
             Code::NoTmux,
-            format!("pane {} is in copy/view mode; leave it first", p.target),
+            format!("pane {} is in copy/view mode; leave it first", pane.target),
         );
     }
-    let id = p.pane.pane_id.clone();
-    let screen = ctx.tmux.capture(&id, 0)?;
-    let prompt = pane::parse_prompt(&screen).ok_or_else(|| {
-        CliError::new(
-            Code::NoPrompt,
-            format!("could not find a dialog on {}'s screen", s.name),
-        )
-    })?;
-    if prompt.kind != "permission" {
-        return err(
-            Code::NoPrompt,
-            format!(
-                "the dialog in '{}' is not a permission prompt ({:?}); answer it with `ccctl cmd --keys`",
-                s.name, prompt.question
-            ),
-        );
-    }
-    let opt = prompt.pick(choice).cloned();
-    let keys = match (&opt, choice) {
-        (Some(o), _) => pane::nav_keys(prompt.selected_index(), o.index),
-        (None, Choice::Deny) => vec!["Escape".to_string()],
-        (None, _) => {
-            let labels: Vec<String> = prompt
-                .options
-                .iter()
-                .map(|o| format!("{}. {}", o.index, o.label))
-                .collect();
-            return err(
-                Code::NoPrompt,
-                format!(
-                    "no option for {:?} in this prompt; options are:\n  {}",
-                    choice,
-                    labels.join("\n  ")
-                ),
-            );
-        }
-    };
+    let insp = pane::inspect(&ctx.tmux.capture(&pane.pane.pane_id, 0)?);
+    Ok(Target { s, pane, insp })
+}
+
+fn indent_screen(screen: &str) -> String {
+    screen
+        .lines()
+        .map(|l| format!("  │ {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn options_list(p: &Prompt) -> String {
+    p.options
+        .iter()
+        .map(|o| format!("  {}. {}", o.index, o.label))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Error for "status says waiting, but the screen has no menu we understand".
+fn unrecognized(t: &Target, hint: &str) -> CliError {
+    CliError::new(
+        Code::NoPrompt,
+        format!(
+            "unrecognized dialog on '{}' (waiting for: {}); ccctl will not press keys it cannot map to an option.{hint}\n\
+             Answer by hand: `ccctl attach {}` or `ccctl cmd {} --keys …`. Screen:\n{}",
+            t.s.name,
+            waiting_kind(&t.s, Some(&t.insp)).unwrap_or_else(|| "unknown".into()),
+            t.s.name,
+            t.s.name,
+            indent_screen(&t.insp.screen),
+        ),
+    )
+}
+
+/// Send `keys` to the dialog (re-checking it first), report if it closed.
+fn press(ctx: &Ctx, t: &Target, keys: &[String]) -> Result<bool> {
+    let id = &t.pane.pane.pane_id;
+    let before = t.insp.prompt.as_ref().map(|p| p.options.clone());
     // Re-check the screen right before acting so we never answer a different dialog.
-    let again = ctx.tmux.capture(&id, 0)?;
-    let still = pane::parse_prompt(&again);
-    if still.as_ref().map(|p| &p.options) != Some(&prompt.options) {
+    let again = pane::parse_prompt(&ctx.tmux.capture(id, 0)?).map(|p| p.options);
+    if again != before {
         return err(
             Code::NoPrompt,
             "the dialog changed while reading it; run the command again",
         );
     }
-    // One key per send-keys with a short gap: TUIs that parse input per
-    // read() (and Ink's select) handle discrete keypresses most reliably.
+    // One key per send-keys with a short gap: Ink's select handles discrete
+    // keypresses most reliably.
     for (i, k) in keys.iter().enumerate() {
         if i > 0 {
             std::thread::sleep(Duration::from_millis(80));
         }
-        ctx.tmux.send_keys(&id, std::slice::from_ref(k))?;
+        ctx.tmux.send_keys(id, std::slice::from_ref(k))?;
     }
-    state::record(&s.session_id);
-    // Give the TUI a moment and report whether the dialog went away.
+    state::record(&t.s.session_id);
     let deadline = Instant::now() + Duration::from_secs(3);
-    let mut cleared = false;
     while Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(250));
-        let scr = ctx.tmux.capture(&id, 0).unwrap_or_default();
-        if pane::parse_prompt(&scr).map(|p| p.options) != Some(prompt.options.clone()) {
-            cleared = true;
-            break;
+        let scr = ctx.tmux.capture(id, 0).unwrap_or_default();
+        if pane::parse_prompt(&scr).map(|p| p.options) != before {
+            return Ok(true);
+        }
+        if before.is_none() {
+            // Unrecognized dialog: settle for the session leaving `waiting`.
+            if discovery::refresh(&ctx.cfg, &t.s)
+                .is_some_and(|c| c.status != Status::WaitingPermission)
+            {
+                return Ok(true);
+            }
         }
     }
-    let label = opt
-        .as_ref()
-        .map(|o| o.label.clone())
-        .unwrap_or_else(|| "Escape".into());
+    Ok(false)
+}
+
+fn report_press(
+    ctx: &Ctx,
+    t: &Target,
+    verb: &str,
+    label: &str,
+    keys: &[String],
+    cleared: bool,
+    extra: Value,
+) -> Result<()> {
     if ctx.json {
-        return print_json(&json!({
-            "session": s.name, "choice": format!("{choice:?}").to_lowercase(),
-            "option": opt, "keys": keys, "dialog_cleared": cleared, "prompt": prompt,
-        }));
+        let mut v = json!({
+            "session": t.s.name, "action": verb, "option": label, "keys": keys,
+            "dialog_cleared": cleared, "prompt": t.insp.prompt,
+        });
+        if let Value::Object(e) = extra {
+            for (k, val) in e {
+                v[k] = val;
+            }
+        }
+        return print_json(&v);
     }
     eprintln!(
-        "ccctl: {} '{}': {}{}",
-        if choice == Choice::Deny {
-            "denied"
-        } else {
-            "approved"
-        },
-        s.name,
-        label,
+        "ccctl: {verb} '{}': {label}{}",
+        t.s.name,
         if cleared {
             ""
         } else {
@@ -998,6 +1084,60 @@ fn answer(ctx: &Ctx, g: &GuardArgs, choice: Choice) -> Result<()> {
         }
     );
     Ok(())
+}
+
+fn approve_choice(ctx: &Ctx, g: &GuardArgs, choice: Choice) -> Result<()> {
+    let t = dialog_target(ctx, g)?;
+    if let Some(n) = &t.insp.notice {
+        return err(
+            Code::NoPrompt,
+            format!(
+                "Claude is not offering Yes on '{}': \"{n}\". Make the pane taller (ccctl never changes your layout) or answer by hand.\nScreen:\n{}",
+                t.s.name,
+                indent_screen(&t.insp.screen)
+            ),
+        );
+    }
+    let Some(prompt) = t.insp.prompt.as_ref() else {
+        return Err(unrecognized(&t, ""));
+    };
+    let claude_kind = t.s.waiting_for.as_deref().map(pane::kind_from_waiting_for);
+    if prompt.kind != "permission" || claude_kind.as_deref().is_some_and(|k| k != "permission") {
+        return err(
+            Code::NoPrompt,
+            format!(
+                "the dialog on '{}' is a {}, not a tool-permission prompt; pick an answer with `ccctl choose {} <number|label>` or cancel it with `ccctl deny {}`.\n{}\n{}",
+                t.s.name,
+                claude_kind.unwrap_or_else(|| prompt.kind.clone()),
+                t.s.name,
+                t.s.name,
+                prompt.question.as_deref().unwrap_or(""),
+                options_list(prompt)
+            ),
+        );
+    }
+    let Some(opt) = prompt.pick(choice).cloned() else {
+        return err(
+            Code::NoPrompt,
+            format!(
+                "no option for {:?} in this prompt; options are:\n{}\n(use `ccctl choose {} <number>` to pick one directly)",
+                choice,
+                options_list(prompt),
+                t.s.name
+            ),
+        );
+    };
+    let keys = pane::nav_keys(prompt.selected_index(), opt.index);
+    let cleared = press(ctx, &t, &keys)?;
+    report_press(
+        ctx,
+        &t,
+        "approved",
+        &opt.label,
+        &keys,
+        cleared,
+        json!({"choice": format!("{choice:?}").to_lowercase(), "option": opt, "option_index": opt.index}),
+    )
 }
 
 pub fn approve(ctx: &Ctx, a: &ApproveArgs) -> Result<()> {
@@ -1008,11 +1148,65 @@ pub fn approve(ctx: &Ctx, a: &ApproveArgs) -> Result<()> {
     } else {
         Choice::Once
     };
-    answer(ctx, &a.guard, choice)
+    approve_choice(ctx, &a.guard, choice)
 }
 
-pub fn deny(ctx: &Ctx, g: &GuardArgs) -> Result<()> {
-    answer(ctx, g, Choice::Deny)
+/// Permission prompt: pick its "No…" option. Question or other dialog:
+/// Escape (cancel). Unrecognized dialog: Escape only with --force.
+pub fn deny(ctx: &Ctx, a: &DenyArgs) -> Result<()> {
+    let t = dialog_target(ctx, &a.guard)?;
+    let esc = || vec!["Escape".to_string()];
+    let (keys, label, opt) = match t.insp.prompt.as_ref() {
+        Some(p) if p.kind == "permission" => match p.pick(Choice::Deny) {
+            Some(o) => (
+                pane::nav_keys(p.selected_index(), o.index),
+                o.label.clone(),
+                Some(o.clone()),
+            ),
+            None => (esc(), "Escape".to_string(), None),
+        },
+        Some(_) => (esc(), "Escape (cancel)".to_string(), None),
+        None if a.force => (esc(), "Escape (forced)".to_string(), None),
+        None => return Err(unrecognized(&t, " Pass --force to press Escape anyway.")),
+    };
+    let cleared = press(ctx, &t, &keys)?;
+    report_press(
+        ctx,
+        &t,
+        "denied",
+        &label,
+        &keys,
+        cleared,
+        json!({"option": opt}),
+    )
+}
+
+/// Pick any option of the dialog on screen by number or label.
+pub fn choose(ctx: &Ctx, a: &ChooseArgs) -> Result<()> {
+    let t = dialog_target(ctx, &a.guard)?;
+    let Some(prompt) = t.insp.prompt.as_ref() else {
+        return Err(unrecognized(&t, ""));
+    };
+    let opt = prompt
+        .find(&a.option)
+        .map_err(|m| {
+            CliError::new(
+                Code::NoPrompt,
+                format!("{m}; options are:\n{}", options_list(prompt)),
+            )
+        })?
+        .clone();
+    let keys = pane::nav_keys(prompt.selected_index(), opt.index);
+    let cleared = press(ctx, &t, &keys)?;
+    report_press(
+        ctx,
+        &t,
+        "chose",
+        &opt.label,
+        &keys,
+        cleared,
+        json!({"option": opt, "option_index": opt.index}),
+    )
 }
 
 // ---------------------------------------------------------------- attach / doctor

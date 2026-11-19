@@ -1,0 +1,4 @@
+ Bash command
+   rm -rf build/
+ This terminal is too short. Make it taller to choose Yes, or choose No.
+ ❯ 1. No, and tell Claude what to do differently (esc)

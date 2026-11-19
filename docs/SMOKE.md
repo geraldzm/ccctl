@@ -51,12 +51,25 @@ Each step lists what to expect.
 - [ ] `ccctl ask ccctl-smoke --text "Run the bash command: touch /tmp/ccctl-smoke/a" --timeout 5`: times out (exit 6) with a stderr note that it is waiting on a permission prompt.
 - [ ] `ccctl pending`: lists `ccctl-smoke` with the Bash command, the question and numbered options.
 - [ ] `ccctl status ccctl-smoke`: `waiting_permission`, prompt shown.
-- [ ] `claude agents --json | jq '.[] | select(.name=="ccctl-smoke") | .waitingFor'`: note the exact value here (_____). `ccctl pending --json` shows the same value as `waiting_for_raw` and `waiting_for: "permission"`.
+- [ ] `claude agents --json | jq '.[] | select(.name=="ccctl-smoke") | .waitingFor'` prints `"permission prompt"`. `ccctl pending --json` shows it as `waiting_for_raw`, with `waiting_for: "permission"` and `dialog_recognized: true`.
 - [ ] `ccctl cmd ccctl-smoke -- hello`: refused (exit 5, "showing a dialog").
 - [ ] `ccctl approve ccctl-smoke --once`: the dialog closes and the file is created.
 - [ ] Repeat with `touch b` and `ccctl deny ccctl-smoke`: the dialog closes with "No".
 - [ ] Repeat with a file edit, then `ccctl approve ccctl-smoke --session`: picks *Yes, allow all edits during this session*.
 - [ ] `ccctl approve ccctl-smoke` with no dialog: exit 9.
+- [ ] In a **narrow pane** (split the window until it's ~50 columns wide), ask for `git push --dry-run` to a long branch name. The labels wrap over several lines; `ccctl pending` still shows 3 options, and `ccctl approve ccctl-smoke --once` works.
+
+## Questions (AskUserQuestion)
+
+- [ ] `ccctl send ccctl-smoke --text "Use AskUserQuestion to ask me which of two colors I prefer (red, blue). Wait for my answer."`, then wait a few seconds.
+- [ ] `ccctl pending`: `waiting for: question` (raw `input needed`), with the question, both options and their descriptions.
+- [ ] `ccctl approve ccctl-smoke`: exit 9 and a message pointing at `ccctl choose`.
+- [ ] `ccctl choose ccctl-smoke blue`: the dialog closes and Claude's next reply says blue.
+- [ ] Ask again, then `ccctl deny ccctl-smoke`: the question is cancelled (Escape).
+
+## When a dialog is not recognized
+
+- [ ] Whenever `pending` says `dialog: not recognized by ccctl`, save the screen as a fixture: `ccctl status <s> --screen --json | jq -r .screen > tests/fixtures/dialogs/<short-name>.txt`. Remove anything private, then add a parser test for it in `src/pane.rs`.
 
 ## Safety
 

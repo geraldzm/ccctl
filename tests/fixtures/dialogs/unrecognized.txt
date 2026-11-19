@@ -1,0 +1,6 @@
+ Claude Code has been updated to 2.1.330.
+
+ What's new:
+  • Faster startup
+
+ Press Enter to continue…

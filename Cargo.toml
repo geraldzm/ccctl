@@ -1,6 +1,6 @@
 [package]
 name = "ccctl"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
 description = "The CLI tool to control your Claude Code sessions running in tmux"
@@ -10,6 +10,19 @@ homepage = "https://github.com/geraldzm/ccctl"
 readme = "README.md"
 keywords = ["claude", "claude-code", "tmux", "cli", "automation"]
 categories = ["command-line-utilities", "development-tools"]
+# Ship only the project's own files (never local tooling dirs in the checkout).
+include = [
+    "src/**/*.rs",
+    "tests/**/*.rs",
+    "tests/fake_claude.py",
+    "tests/fixtures/**/*.txt",
+    "docs/*.md",
+    "README.md",
+    "LICENSE",
+    "config.example.toml",
+    "Cargo.toml",
+    "Cargo.lock",
+]
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive", "env"] }

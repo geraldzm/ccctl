@@ -25,13 +25,13 @@ lock = threading.Lock()
 now = lambda: int(time.time() * 1000)
 
 
-def reg(status):
+def reg(status, waiting_for=None):
     rec = {"pid": pid, "sessionId": sid, "cwd": cwd, "startedAt": now(), "procStart": proc_start,
            "version": "fake", "peerProtocol": 1, "kind": "interactive", "entrypoint": "cli",
            "messagingSocketPath": sock_path, "name": name, "status": status,
            "updatedAt": now(), "statusUpdatedAt": now()}
-    if status == "waiting":
-        rec["waitingFor"] = "permission prompt"
+    if status == "waiting" and waiting_for:
+        rec["waitingFor"] = waiting_for
     tmp = os.path.join(sessions, f".{pid}.tmp")
     with open(tmp, "w") as f:
         json.dump(rec, f)
@@ -90,15 +90,65 @@ def inbox():
                 "echo: " + body), daemon=True).start()
 
 
-OPTIONS = ["Yes", "Yes, and don't ask again for rm commands in " + cwd,
-           "No, and tell Claude what to do differently (esc)"]
+import textwrap
+
+PERM_OPTIONS = ["Yes", "Yes, and don't ask again for rm commands in " + cwd,
+                "No, and tell Claude what to do differently (esc)"]
+PUSH_OPTIONS = ["Yes", "Yes, and don't ask again for git push commands in " + cwd,
+                "No, and tell Claude what to do differently (esc)"]
+ASK_OPTIONS = [("Fresh subagent", "Spawn a new reviewer with no prior context"),
+               ("Me (the main session)", "Re-check it myself in this conversation"),
+               ("Type something.", None)]
 
 
-def draw_dialog(sel):
-    sys.stdout.write("\x1b[2J\x1b[H")
-    sys.stdout.write("Bash command\n\n  rm -rf build/\n\nDo you want to proceed?\n")
-    for i, o in enumerate(OPTIONS):
-        sys.stdout.write(("❯ " if i == sel else "  ") + f"{i + 1}. {o}\n")
+def draw_perm(sel):
+    out = "Bash command\n\n  rm -rf build/\n\nDo you want to proceed?\n"
+    for i, o in enumerate(PERM_OPTIONS):
+        out += ("❯ " if i == sel else "  ") + f"{i + 1}. {o}\n"
+    return out
+
+
+def draw_longperm(sel):
+    # Narrow boxed layout: labels wrap over several lines (Claude 2.1.3xx).
+    w = 44
+    row = lambda t: "│ " + t.ljust(w) + " │\n"
+    out = "╭" + "─" * (w + 2) + "╮\n" + row("Bash command") + row("")
+    for t in ["  git push -u origin", "  feature/add-retry-to-sync-worker", "  Push the branch"]:
+        out += row(t)
+    out += row("") + row("Do you want to proceed?")
+    for i, o in enumerate(PUSH_OPTIONS):
+        parts = textwrap.wrap(f"{i + 1}. {o}", w - 2)
+        out += row(("❯ " if i == sel else "  ") + parts[0])
+        for cont in parts[1:]:
+            out += row("  " + cont)
+    return out + "╰" + "─" * (w + 2) + "╯\n"
+
+
+def draw_ask(sel):
+    out = " ←  ☐ Reviewer  ✔ Submit  →\n\nWho should do the second fairness review?\n\n"
+    for i, (lab, desc) in enumerate(ASK_OPTIONS):
+        out += ("❯ " if i == sel else "  ") + f"{i + 1}. {lab}\n"
+        if desc:
+            out += f"     {desc}\n"
+    out += "─" * 40 + "\n" + ("❯ " if sel == 3 else "  ") + "4. Chat about this\n\n"
+    return out + "Enter to select · Tab/Arrow keys to navigate · Esc to cancel\n"
+
+
+def draw_weird(sel):
+    return " Claude Code has been updated.\n\n What's new:\n  • Faster startup\n\n Press Enter to continue…\n"
+
+
+# name -> (draw, option labels or None, waitingFor reported in the registry)
+DIALOGS = {
+    "/perm": (draw_perm, PERM_OPTIONS, "permission prompt"),
+    "/longperm": (draw_longperm, PUSH_OPTIONS, "permission prompt"),
+    "/ask": (draw_ask, [o[0] for o in ASK_OPTIONS] + ["Chat about this"], "input needed"),
+    "/weird": (draw_weird, None, "dialog open"),
+}
+
+
+def draw_dialog(dialog, sel):
+    sys.stdout.write("\x1b[2J\x1b[H" + DIALOGS[dialog][0](sel))
     sys.stdout.flush()
 
 
@@ -117,7 +167,7 @@ def main():
     attrs[3] &= ~termios.ISIG  # deliver Ctrl-C as a byte, like Claude's TUI
     termios.tcsetattr(0, termios.TCSANOW, attrs)
     sys.stdout.write("\x1b[?2004h")  # enable bracketed paste
-    buf, dialog, sel, pasting = "", False, 0, False
+    buf, dialog, sel, pasting = "", None, 0, False
     draw_prompt(buf)
     while True:
         ch = os.read(0, 4096).decode(errors="replace")
@@ -136,28 +186,32 @@ def main():
             for k in keys:
                 if not dialog:
                     break
-                if k in ("\x1b[B", "\x1bOB"):
-                    sel = min(sel + 1, len(OPTIONS) - 1)
-                elif k in ("\x1b[A", "\x1bOA"):
+                opts = DIALOGS[dialog][1]
+                if k in ("\x1b[B", "\x1bOB") and opts:
+                    sel = min(sel + 1, len(opts) - 1)
+                elif k in ("\x1b[A", "\x1bOA") and opts:
                     sel = max(sel - 1, 0)
                 elif k in ("\r", "\n", "\x1b"):
-                    choice = OPTIONS[sel] if k != "\x1b" else "ESC"
+                    if k == "\x1b":
+                        choice = "ESC"
+                    else:
+                        choice = opts[sel] if opts else "ENTER"
                     with open(os.path.join(statedir, "choice.txt"), "w") as f:
                         f.write(choice)
-                    dialog = False
+                    dialog = None
                     reg("idle")
                     draw_prompt("")
             if dialog:
-                draw_dialog(sel)
+                draw_dialog(dialog, sel)
             continue
         if ch in ("\r", "\n"):
             line, buf = buf, ""
             with open(os.path.join(statedir, "typed.log"), "a") as f:
                 f.write(line + "\n")
-            if line == "/perm":
-                dialog, sel = True, 0
-                reg("waiting")
-                draw_dialog(sel)
+            if line in DIALOGS:
+                dialog, sel = line, 0
+                reg("waiting", DIALOGS[line][2])
+                draw_dialog(dialog, sel)
                 continue
             if line.startswith("/"):
                 append({"type": "user", "message": {"role": "user",

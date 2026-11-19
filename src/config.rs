@@ -99,7 +99,7 @@ pub struct TmuxCfg {
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default, deny_unknown_fields)]
 pub struct SecurityCfg {
-    /// Session-name globs that mutating commands (send, cmd, ask, approve,
+    /// Session-name globs that mutating commands (send, cmd, ask, approve, choose,
     /// deny) may target. Absent = every session allowed. `[]` = none.
     pub allowlist: Option<Vec<String>>,
 }

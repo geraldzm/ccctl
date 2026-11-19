@@ -306,7 +306,7 @@ fn fake_session_end_to_end() {
     // no "session" option in this dialog
     assert_eq!(run(&env, &["approve", "fake-one", "--session"]).0, 9);
     let a = json(&env, &["approve", "fake-one", "--always", "--json"]);
-    assert_eq!(a["option"]["index"], 2);
+    assert_eq!(a["option_index"], 2, "{a}");
     assert_eq!(a["dialog_cleared"], true);
     wait_file_contains(&env.p("state/choice.txt"), "don't ask again");
     ok(
@@ -343,6 +343,139 @@ fn fake_session_end_to_end() {
     );
     ok(&env, &["approve", "fake-one"]);
     wait_file_contains(&env.p("state/choice.txt"), "Yes");
+
+    // Wrapped git-push permission in a narrow box (regression, Nov 2026:
+    // "could not find a dialog" because labels wrapped over 3+ lines).
+    let choice = env.p("state/choice.txt");
+    let _ = std::fs::remove_file(&choice);
+    ok(&env, &["cmd", "fake-one", "--", "/longperm"]);
+    ok(
+        &env,
+        &[
+            "wait",
+            "fake-one",
+            "--for",
+            "waiting_permission",
+            "--timeout",
+            "5",
+        ],
+    );
+    let p = json(&env, &["pending", "--json"]);
+    assert_eq!(p[0]["dialog_recognized"], true, "{p}");
+    assert_eq!(p[0]["waiting_for"], "permission");
+    assert_eq!(p[0]["prompt"]["options"].as_array().unwrap().len(), 3);
+    let a = json(&env, &["approve", "fake-one", "--always", "--json"]);
+    assert_eq!(a["option_index"], 2);
+    wait_file_contains(&choice, "git push commands in");
+    ok(
+        &env,
+        &["wait", "fake-one", "--for", "idle", "--timeout", "5"],
+    );
+
+    // AskUserQuestion (regression, Nov 2026: waitingFor
+    // "input needed", options with descriptions + a rule before option 4).
+    let _ = std::fs::remove_file(&choice);
+    ok(&env, &["cmd", "fake-one", "--", "/ask"]);
+    ok(
+        &env,
+        &[
+            "wait",
+            "fake-one",
+            "--for",
+            "waiting_permission",
+            "--timeout",
+            "5",
+        ],
+    );
+    let p = json(&env, &["pending", "--json"]);
+    assert_eq!(p[0]["waiting_for"], "question");
+    assert_eq!(p[0]["waiting_for_raw"], "input needed");
+    assert_eq!(
+        p[0]["prompt"]["question"],
+        "Who should do the second fairness review?"
+    );
+    assert_eq!(p[0]["prompt"]["options"].as_array().unwrap().len(), 4);
+    assert_eq!(
+        p[0]["prompt"]["options"][0]["detail"],
+        "Spawn a new reviewer with no prior context"
+    );
+    let (c, _, e) = run(&env, &["approve", "fake-one"]);
+    assert_eq!(c, 9);
+    assert!(e.contains("ccctl choose"), "{e}");
+    let c = json(&env, &["choose", "fake-one", "me", "--json"]);
+    assert_eq!(c["option_index"], 2);
+    assert_eq!(c["dialog_cleared"], true);
+    wait_file_contains(&choice, "Me (the main session)");
+    ok(
+        &env,
+        &["wait", "fake-one", "--for", "idle", "--timeout", "5"],
+    );
+    // deny on a question = Escape (cancel)
+    let _ = std::fs::remove_file(&choice);
+    ok(&env, &["cmd", "fake-one", "--", "/ask"]);
+    ok(
+        &env,
+        &[
+            "wait",
+            "fake-one",
+            "--for",
+            "waiting_permission",
+            "--timeout",
+            "5",
+        ],
+    );
+    assert_eq!(run(&env, &["choose", "fake-one", "nope"]).0, 9);
+    ok(&env, &["deny", "fake-one"]);
+    wait_file_contains(&choice, "ESC");
+    ok(
+        &env,
+        &["wait", "fake-one", "--for", "idle", "--timeout", "5"],
+    );
+
+    // Unrecognized dialog: raw screen surfaced, explicit errors, deny --force.
+    let _ = std::fs::remove_file(&choice);
+    ok(&env, &["cmd", "fake-one", "--", "/weird"]);
+    ok(
+        &env,
+        &[
+            "wait",
+            "fake-one",
+            "--for",
+            "waiting_permission",
+            "--timeout",
+            "5",
+        ],
+    );
+    let st = json(&env, &["status", "fake-one", "--json"]);
+    assert_eq!(st["dialog_recognized"], false);
+    assert_eq!(st["waiting_for"], "dialog");
+    assert!(
+        st["screen"]
+            .as_str()
+            .unwrap()
+            .contains("Press Enter to continue")
+    );
+    let human = ok(&env, &["pending"]);
+    assert!(
+        human.contains("not recognized") && human.contains("Press Enter to continue"),
+        "{human}"
+    );
+    let (c, _, e) = run(&env, &["approve", "fake-one"]);
+    assert_eq!(c, 9);
+    assert!(
+        e.contains("unrecognized dialog") && e.contains("Press Enter to continue"),
+        "{e}"
+    );
+    let (c, _, e) = run(&env, &["deny", "fake-one"]);
+    assert_eq!(c, 9);
+    assert!(e.contains("--force"), "{e}");
+    assert!(!choice.exists(), "nothing may be pressed without --force");
+    ok(&env, &["deny", "fake-one", "--force"]);
+    wait_file_contains(&choice, "ESC");
+    ok(
+        &env,
+        &["wait", "fake-one", "--for", "idle", "--timeout", "5"],
+    );
 
     // Exit codes.
     assert_eq!(

@@ -1,0 +1,14 @@
+ some output above
+╭──────────────────────────────────────────────────╮
+│ Bash command                                     │
+│                                                  │
+│   rm -rf build/                                  │
+│   Clean build dir                                │
+│                                                  │
+│ Do you want to proceed?                          │
+│ ❯ 1. Yes                                         │
+│   2. Yes, and don't ask again for rm commands in │
+│ /home/x/proj                                     │
+│   3. No, and tell Claude what to do differently  │
+│ (esc)                                            │
+╰──────────────────────────────────────────────────╯

@@ -1,0 +1,7 @@
+ Make auto mode the default permission mode?
+
+ ❯ Yes, make it the default
+   No, keep the current mode
+   Ask me later
+
+ Enter to confirm · Esc to cancel

@@ -1,0 +1,17 @@
+● Committed 3f9c2a1. Pushing the branch next.
+
+╭────────────────────────────────────────────────╮
+│ Bash command                                   │
+│                                                │
+│   git push -u origin                           │
+│   feature/add-retry-to-sync-worker           │
+│   Push the branch to origin                    │
+│                                                │
+│ Do you want to proceed?                        │
+│ ❯ 1. Yes                                       │
+│   2. Yes, and don't ask again for git push     │
+│   commands in                                  │
+│   /home/me/src/monorepo                        │
+│   3. No, and tell Claude what to do            │
+│   differently (esc)                            │
+╰────────────────────────────────────────────────╯

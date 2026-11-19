@@ -1,6 +1,7 @@
 # Claude Code integration surface used by ccctl
 
-Verified against **Claude Code 2.1.318** (Linux, Nov 2026). Everything here is
+Verified against **Claude Code 2.1.318**; dialog handling re-verified against
+**2.1.328** (Linux, Nov 2026). Everything here is
 observed behaviour or read from string literals in the shipped binary, not a
 stable public API. Re-check this file when `claude --version` changes
 (`ccctl doctor` prints both the installed version and the tested one).
@@ -32,18 +33,24 @@ prompt, elicitation, worker/sandbox request; otherwise `busy` while loading).
 | `waiting` | `waiting_permission` |
 | anything else | `unknown` |
 
-`waiting` alone does not say *why*. `status`, `pending` and `list --json` report
-`waiting_for`:
+`waiting` alone does not say *why*. Claude Code 2.1.328 derives `waitingFor` from the
+dialog on top (`YQ()`/`H4o()` and the per-dialog table `Rf` in the binary):
 
-1. Claude's own `waitingFor`, from `claude agents --json` (or the registry file if it
-   carries one). Any value containing "permission" is normalised to `permission`;
-   other values pass through verbatim, e.g. `input needed`. The raw value is also
-   exposed (`waiting_for_raw` in `pending`, `waiting_for` in `list --json`).
-2. Otherwise the pane scrape's classification: `permission` (Yes/No options) or
-   `question`.
+| `waitingFor` | When | ccctl `waiting_for` |
+|---|---|---|
+| `permission prompt` | default for any dialog kind not in the table: every tool-permission request (Bash, Edit, WebFetch, Task/Agent, …) | `permission` |
+| `input needed` | `permission_ask_user_question` (Claude's AskUserQuestion), MCP elicitations (`mcp_elicitation`, `mcp_url_elicitation`), a few setup questions | `question` |
+| `dialog open` | other modal dialogs (local JSX commands, notices, mode proposals, …) | `dialog` |
+| `worker request`, `sandbox request`, `goal proposal` | as named | passed through |
 
-`approve`/`deny` still require the on-screen dialog to parse as a Yes/No permission
-prompt, because they need the option labels, which only exist on screen.
+`status`, `pending` and `list --json` report `waiting_for` from that value
+(`waiting_for_raw` keeps the original). Without one, ccctl uses the screen read
+(`permission` / `question`), or `unknown` if nothing on screen was recognized.
+
+**"input needed" is not a tool permission.** It is almost always Claude asking you a
+multiple-choice question. `approve` refuses it and points at `choose`. That was the
+root cause of the Nov 2026 reports where sessions showed "input needed" and
+`approve` said "could not find a dialog".
 
 ## 2. tmux target resolution
 
@@ -120,24 +127,54 @@ delivery produces no receipt. So ccctl:
    `peer_message_status`. This is off by default because a `from` makes the receiving
    Claude believe it can reply, and the socket is gone moments later.
 
-## 6. Permission prompts
+## 6. Dialogs on screen (permission prompts, questions)
 
-The option labels exist only on screen. ccctl captures the pane, finds the bottom-most
-`1. … 2. … 3. …` block (box-drawing characters stripped, wrapped labels re-joined) and
-classifies it as `permission` when there is a `Yes…` option and a `No…` option.
-Options are chosen by label:
+Option labels exist only on screen. While a session is `waiting`, ccctl captures the
+pane (`tmux capture-pane -p -J`, visible screen only, read-only) and looks for the
+**bottom-most live menu**:
 
-| flag | label rule (2.1.318 wording) |
-|---|---|
-| `--once` | starts with "Yes" and has no "don't ask"/"always"/"session"/", and" |
-| `--session` | "Yes…" containing "session" (e.g. *Yes, allow all edits during this session*) |
-| `--always` | "Yes…" containing "don't ask again" / "always" |
-| `deny` | starts with "No" (fallback: Escape) |
+* **Numbered menus** (`❯ 1. Yes`, `2) No`, `3. [ ] Option`): a chain `1..k`, k ≥ 2,
+  read upward from the bottom option. Up to 8 lines are allowed between consecutive
+  options. Those lines are wrapped label text (joined into the label when the next line
+  starts lowercase, `/`, `(`…) or descriptions (kept as `detail`, as in
+  AskUserQuestion). Box drawing, `────` rules and footer hints (`Enter to select ·
+  Esc to cancel`) are skipped.
+* **Menus without indexes** (`hideIndexes`): a `❯` cursor line plus contiguous
+  siblings aligned at the same text column (2–9 options).
+* **It must be a live select, not prose.** Exactly one option carries the `❯` cursor.
+  At most 10 non-empty lines may follow the menu, and the prompt input box (a `❯`
+  line right under a rule, including titled rules like `──── session-name ─`) must
+  not appear below it. Claude hides the input box while a dialog is open, so a
+  numbered list in a reply above the input box is rejected.
+* **Notices** such as *"This terminal is too short. Make it taller to choose Yes, or
+  choose No."* are reported as `notice`. `approve` refuses to act and asks for a taller
+  pane, because ccctl never resizes your layout.
+* **Unrecognized dialogs**: whenever the session waits but no menu is found (or a
+  notice is shown), `status`/`pending` include `screen`, the raw bottom 40 lines, and
+  `dialog_recognized: false`. `approve`/`choose` exit 9 and print that screen. `deny`
+  presses Escape only with `--force`.
 
-Keys are sent the way a person would: arrow keys from the currently highlighted option
-(`❯`) to the target, then Enter, one key per `send-keys`. The screen is re-captured
-just before acting, and ccctl refuses if the dialog changed. If no option matches,
-ccctl exits 9 and prints the options it saw. It never guesses.
+A menu is classified `permission` when it has a `Yes…` and a `No…` option. Actions:
+
+| command | on a permission prompt | on a question / other menu |
+|---|---|---|
+| `approve --once` | "Yes…" with no "don't ask"/"always"/"session"/", and" | refused (exit 9), points at `choose` |
+| `approve --session` | "Yes…" containing "session" (e.g. *Yes, allow all edits during this session*) | refused |
+| `approve --always` | "Yes…" containing "don't ask again" / "always" | refused |
+| `deny` | the "No…" option (fallback Escape) | Escape (cancel) |
+| `choose <n\|label>` | any option | any option (number, exact label, unique prefix, unique substring) |
+
+`approve` also refuses when Claude's own `waitingFor` says the dialog is not a
+`permission prompt`, even if the labels look like Yes/No.
+
+Keys are sent the way a person would: arrow keys from the highlighted option (`❯`) to
+the target, then Enter, one key per `send-keys` with an 80 ms gap. The screen is
+re-captured right before acting, and ccctl refuses if the menu changed. Afterwards it
+waits up to 3 s for the menu to go away and reports `dialog_cleared`.
+
+Regression fixtures live in `tests/fixtures/dialogs/`. To add one from a live session
+(read-only): `ccctl status <s> --screen --json | jq -r .screen >
+tests/fixtures/dialogs/<name>.txt`, then strip anything private before committing.
 
 ## 7. Known gaps / things the protocol does not offer
 
@@ -151,11 +188,14 @@ ccctl exits 9 and prints the options it saw. It never guesses.
   dialog (status becomes `waiting`). Options: approve it in the pane, use
   `--via tmux`, or set `"crossSessionInbound": "accept"` in that session's settings.
 * **No receipt for normal delivery** (see §5). Transcript confirmation fills the gap.
-* **`waitingFor` is coarse.** It says *that* a permission is pending but not which tool
-  or which options. The pane scrape is the only source for those. Its exact
-  vocabulary is undocumented: ccctl only checks for "permission" and otherwise passes
-  it through. None of the live sessions were waiting while this was written, so the
-  field is exercised by the fake session only.
+* **`waitingFor` is coarse.** It names the dialog family (§1) but not the tool, the
+  question or the options. The screen read is the only source for those, and Claude's
+  dialog layouts change between releases. When a new layout isn't recognized, ccctl
+  reports it (`dialog_recognized: false` plus the raw `screen`) instead of guessing.
+  Capture it as a fixture (§6).
+* **Multi-select questions** (checkbox menus with a separate Submit step) can be read,
+  and `choose` moves to and presses Enter on an option. Toggling several boxes and
+  submitting still needs `cmd --keys` (Space/Enter/Tab) or the pane.
 * **Stale idle after input.** The registry may still say `idle` for a moment after
   input arrives, and local commands (e.g. bare `/goal`) may never flip to `busy`.
   `wait --for idle` therefore ignores an idle older than ccctl's last send/cmd until

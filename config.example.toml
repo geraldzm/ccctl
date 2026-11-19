@@ -32,7 +32,7 @@ enter_delay_ms = 200  # pause between typing text and pressing Enter in `cmd` (m
 # socket = "/tmp/tmux-1000/default"   # only if your sessions live on a non-default server
 
 [security]
-# Session-name globs that MUTATING commands (send, cmd, ask, approve, deny) may target.
+# Session-name globs that MUTATING commands (send, cmd, ask, approve, deny, choose) may target.
 # Read-only commands (list, status, wait, read, pending, attach) ignore it.
 # Absent  -> every session may be targeted.
 # []      -> no session may be targeted.

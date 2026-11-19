@@ -38,7 +38,13 @@ pub enum Cmd {
         all: bool,
     },
     /// Show one session (status, tmux target, transcript, last activity)
-    Status { session: String },
+    Status {
+        session: String,
+        /// Include the raw bottom of the pane (always included when a
+        /// dialog is on screen but not recognized)
+        #[arg(long)]
+        screen: bool,
+    },
     /// Send a normal chat message (inbox socket; never runs slash commands)
     Send(SendArgs),
     /// Type into the session's tmux pane so the TUI runs it (slash commands, keys)
@@ -49,12 +55,20 @@ pub enum Cmd {
     Wait(WaitArgs),
     /// Print the last assistant turn(s) from the transcript
     Read(ReadArgs),
-    /// List sessions waiting on a permission prompt / dialog
-    Pending,
-    /// Approve the permission prompt on screen
+    /// List sessions waiting on a dialog (permission prompt, question, ...)
+    Pending {
+        /// Include the raw bottom of each pane (always included for
+        /// dialogs ccctl does not recognize)
+        #[arg(long)]
+        screen: bool,
+    },
+    /// Approve the tool-permission prompt on screen
     Approve(ApproveArgs),
-    /// Deny the permission prompt on screen
-    Deny(GuardArgs),
+    /// Deny the permission prompt (picks "No"), or cancel a question (Esc)
+    Deny(DenyArgs),
+    /// Pick an option in the dialog on screen by number or label
+    /// (AskUserQuestion questions, any menu)
+    Choose(ChooseArgs),
     /// Switch to / attach the session's tmux pane (only when asked)
     Attach { session: String },
     /// Check environment: claude binary, registry, sockets, tmux, config
@@ -212,6 +226,24 @@ pub struct ReadArgs {
     /// the msg_id printed by `send`)
     #[arg(long, value_name = "ID")]
     pub since: Option<String>,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct DenyArgs {
+    #[command(flatten)]
+    pub guard: GuardArgs,
+    /// Press Escape even when ccctl cannot recognize the dialog on screen
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ChooseArgs {
+    #[command(flatten)]
+    pub guard: GuardArgs,
+    /// Option number (as shown by `pending`) or label text (exact, unique
+    /// prefix, or unique substring; case-insensitive)
+    pub option: String,
 }
 
 #[derive(Args, Debug, Clone)]

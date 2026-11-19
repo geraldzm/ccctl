@@ -28,15 +28,16 @@ fn main() {
         let ctx = Ctx::new(cfg, path, cli.json);
         match &cli.cmd {
             Cmd::List { all } => commands::list(&ctx, *all),
-            Cmd::Status { session } => commands::status(&ctx, session),
+            Cmd::Status { session, screen } => commands::status(&ctx, session, *screen),
             Cmd::Send(a) => commands::send(&ctx, a),
             Cmd::Cmd(a) => commands::cmd(&ctx, a),
             Cmd::Ask(a) => commands::ask(&ctx, a),
             Cmd::Wait(a) => commands::wait(&ctx, a),
             Cmd::Read(a) => commands::read(&ctx, a),
-            Cmd::Pending => commands::pending(&ctx),
+            Cmd::Pending { screen } => commands::pending(&ctx, *screen),
             Cmd::Approve(a) => commands::approve(&ctx, a),
-            Cmd::Deny(g) => commands::deny(&ctx, g),
+            Cmd::Deny(a) => commands::deny(&ctx, a),
+            Cmd::Choose(a) => commands::choose(&ctx, a),
             Cmd::Attach { session } => commands::attach(&ctx, session),
             Cmd::Doctor => commands::doctor(&ctx),
         }

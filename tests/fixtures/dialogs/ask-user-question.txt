@@ -1,0 +1,15 @@
+● Fairness re-check done: 2 of 9 rubric items still need a second look.
+
+ ←  ☐ Reviewer  ✔ Submit  →
+
+Who should do the second fairness review?
+
+❯ 1. Fresh subagent
+     Spawn a new reviewer with no prior context
+  2. Me (the main session)
+     Re-check it myself in this conversation
+  3. Type something.
+────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

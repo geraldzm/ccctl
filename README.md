@@ -71,16 +71,17 @@ name) or **pid**. Ambiguous selectors fail with exit 4 and list the candidates.
 | Command | What it does |
 |---|---|
 | `list [--all] [--json]` | Interactive sessions: name, status, pid, cwd, tmux target, session id, socket. `--all` adds background sessions. |
-| `status <s> [--json]` | One session plus last activity, transcript path, last msg id, and, if waiting, `waiting_for` and the on-screen dialog. |
+| `status <s> [--screen] [--json]` | One session plus last activity, transcript path, last msg id, and, if waiting, `waiting_for` and the on-screen dialog. `--screen` adds the raw bottom of the pane. |
 | `send <s> --text T \| --file P \| --stdin` | Plain chat message. Confirms delivery from the transcript. Prints the inbox `msg_id`. |
 | `cmd <s> -- "text"` | Types literal text into the pane, then Enter (`--no-enter` to skip). For `/commands` and TUI input. |
 | `cmd <s> --keys K...` | Key presses: `Enter`, `Escape`/`esc`, `C-c`/`ctrl-c`, `Up`, `Down`, `BTab`/`shift-tab`, `Tab`, `1`… |
 | `ask <s> --text T [--timeout S]` | send → wait until idle → print the reply turn (`--json` for the full turn object). |
 | `wait <s> [--for idle\|busy\|waiting_permission] [--timeout S]` | Exit 0 on match, 6 on timeout. |
 | `read <s> [--last N] [--since ID] [--json]` | Last N assistant turns from `~/.claude/projects/<cwd>/<sessionId>.jsonl`. |
-| `pending [--json]` | Sessions blocked on a dialog: Claude's `waitingFor`, plus the question and options read from the pane. |
-| `approve <s> [--once\|--session\|--always]` | Picks the matching option by label (arrows + Enter, as in the pane). Default `--once`. |
-| `deny <s>` | Picks the "No…" option (Escape if none). |
+| `pending [--screen] [--json]` | Sessions blocked on a dialog: `waiting_for` (`permission`, `question`, `dialog`, …), plus the question and options read from the pane. The raw screen is included whenever the dialog isn't recognized. |
+| `approve <s> [--once\|--session\|--always]` | Tool-permission prompts only: picks the matching "Yes…" option by label (arrows + Enter, as in the pane). Default `--once`. |
+| `deny <s> [--force]` | Permission prompt: picks "No…". Question or other menu: Escape (cancel). Unrecognized dialog: Escape only with `--force`. |
+| `choose <s> <n\|label>` | Picks any option of the dialog on screen, by number or label. Use it for AskUserQuestion questions (`waiting_for: question`). |
 | `attach <s>` | `switch-client` (inside tmux) or `attach-session` to that pane. Only on request. |
 | `doctor [--json]` | Checks the environment: claude version, registry, sockets, tmux, config. |
 
@@ -151,13 +152,13 @@ Unknown keys are rejected so typos fail loudly (exit 2).
 
 ## Security model
 
-* **Allowlist.** `send`, `cmd`, `ask`, `approve` and `deny` refuse sessions whose name
+* **Allowlist.** `send`, `cmd`, `ask`, `approve`, `deny` and `choose` refuse sessions whose name
   matches no `[security].allowlist` glob (exit 5). Read-only commands are unaffected.
 * **Self-protection.** ccctl refuses to drive the Claude session it is running inside
   (detected by walking its own process ancestry) unless you pass `--allow-self`. This
   stops an automation running in session A from typing into A.
 * **Dialog guard.** Typed input (`cmd`, `send --via tmux`) is refused while the target
-  shows a dialog, since keystrokes would answer it. Use `approve`/`deny`/`--keys` or
+  shows a dialog, since keystrokes would answer it. Use `approve`/`deny`/`choose`/`--keys` or
   `--force`.
 * **Approvals** pick options by their on-screen label and re-read the screen just
   before acting. If the expected option is missing or the dialog changed, ccctl stops
